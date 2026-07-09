@@ -1,0 +1,2 @@
+vsphere_host     = "put your vSphere host here"
+vsphere_password = "put your vSphere password here"

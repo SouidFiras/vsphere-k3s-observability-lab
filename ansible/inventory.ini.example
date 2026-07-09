@@ -1,0 +1,7 @@
+[k3s_nodes]
+ubuntu ansible_host=<put-hostname-or-ip-here> ansible_user=<put-username-here>
+k3s-node-1 ansible_host=<put-hostname-or-ip-here> ansible_user=<put-username-here>
+k3s-node-2 ansible_host=<put-hostname-or-ip-here> ansible_user=<put-username-here>
+
+[k3s_nodes:vars]
+ansible_python_interpreter=/usr/bin/python3

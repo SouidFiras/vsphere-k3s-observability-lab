@@ -1,0 +1,61 @@
+---
+- name: Configure UFW firewall on k3s nodes
+  hosts: k3s_nodes
+  become: true
+
+  tasks:
+    - name: Install ufw
+      apt:
+        name: ufw
+        state: present
+        update_cache: true
+
+    - name: Allow SSH (critical - must be first)
+      community.general.ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+
+    - name: Allow k3s API server
+      community.general.ufw:
+        rule: allow
+        port: '6443'
+        proto: tcp
+
+    - name: Allow kubelet API
+      community.general.ufw:
+        rule: allow
+        port: '10250'
+        proto: tcp
+
+    - name: Allow Flannel VXLAN overlay networking
+      community.general.ufw:
+        rule: allow
+        port: '8472'
+        proto: udp
+
+    - name: Allow node-exporter
+      community.general.ufw:
+        rule: allow
+        port: '9100'
+        proto: tcp
+
+    - name: Allow Kubernetes NodePort range
+      community.general.ufw:
+        rule: allow
+        port: '30000:32767'
+        proto: tcp
+
+    - name: Set default incoming policy to deny
+      community.general.ufw:
+        default: deny
+        direction: incoming
+
+    - name: Set default outgoing policy to allow
+      community.general.ufw:
+        default: allow
+        direction: outgoing
+
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled

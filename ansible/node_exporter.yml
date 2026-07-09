@@ -1,0 +1,65 @@
+---
+- name: Install and configure node_exporter
+  hosts: k3s_nodes
+  become: true
+  vars:
+    node_exporter_version: "1.8.2"
+
+  tasks:
+    - name: Check if node_exporter binary already exists
+      stat:
+        path: /usr/local/bin/node_exporter
+      register: node_exporter_binary
+
+    - name: Download node_exporter
+      get_url:
+        url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        dest: "/tmp/node_exporter.tar.gz"
+      when: not node_exporter_binary.stat.exists
+
+    - name: Extract node_exporter
+      unarchive:
+        src: "/tmp/node_exporter.tar.gz"
+        dest: "/tmp/"
+        remote_src: true
+      when: not node_exporter_binary.stat.exists
+
+    - name: Move binary to /usr/local/bin
+      copy:
+        src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+        dest: "/usr/local/bin/node_exporter"
+        mode: '0755'
+        remote_src: true
+      when: not node_exporter_binary.stat.exists
+
+    - name: Create node_exporter system user
+      user:
+        name: node_exporter
+        shell: /usr/sbin/nologin
+        system: true
+        create_home: false
+
+    - name: Create systemd service file
+      copy:
+        dest: /etc/systemd/system/node_exporter.service
+        content: |
+          [Unit]
+          Description=Node Exporter
+          After=network.target
+
+          [Service]
+          User=node_exporter
+          ExecStart=/usr/local/bin/node_exporter
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: true
+
+    - name: Enable and start node_exporter
+      systemd:
+        name: node_exporter
+        enabled: true
+        state: started
