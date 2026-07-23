@@ -14,7 +14,13 @@ Rather than wait for direction, I built a self-contained lab mirroring the same 
 
 ## Architecture
 
-![Architecture Diagram](docs/architecture.png)
+To keep the system legible without visual clutter, the architecture is split into two complementary views: **placement** (where things run) and **data flow** (how metrics and alerts travel).
+
+### 1. Infrastructure & Placement ("What Runs Where")
+![Infrastructure Placement Diagram](docs/VirtualizationArchitecture.png)
+
+### 2. Data Flow & Communication ("What Talks to What")
+![Data Flow Diagram](docs/DataFlow.png)
 
 **Stack summary:**
 - **Host:** Windows 11 → VMware Workstation Pro → nested ESXi 7.0.3 (evaluation license, standalone — no vCenter)
@@ -39,6 +45,7 @@ Rather than wait for direction, I built a self-contained lab mirroring the same 
 **Why Terraform is present but not the active provisioning tool.** Terraform's `vsphere_virtual_machine` resource supports cloning VMs via a `clone` block — but this feature requires **vCenter Server**; it is not available against standalone ESXi, even under an evaluation license. This was discovered directly (`Error: use of the clone sub-resource block requires vCenter`) rather than assumed. The Terraform configuration is kept in [`terraform/`](terraform/) as the intended design for a vCenter-managed environment — it would work unmodified if pointed at real vCenter. In this lab, node provisioning is instead handled by [`scripts/clone_node.sh`](scripts/clone_node.sh), a POSIX shell script run directly on the ESXi host via `vmkfstools` (disk clone) and `vim-cmd solo/registervm` (VM registration) — the CLI-level equivalent of what Terraform would otherwise automate.
 
 **Why monitoring runs externally, not in-cluster.** Prometheus and Grafana run on a dedicated VM outside the k3s cluster, via Docker Compose, rather than deployed inside the cluster (e.g. via the kube-prometheus-stack Helm chart). This keeps monitoring independent of the health of the thing it's observing — if the cluster has issues, the monitoring stack watching it isn't also at risk — and was lighter on resources for this lab's constraints.
+
 
 **Why a custom exporter instead of relying only on community tooling.** `node-exporter` and `kube-state-metrics` cover the system and Kubernetes layers, but neither exposes vSphere-level state (VM power state, datastore capacity, host resource usage as seen by the hypervisor). [`vsphere-exporter/vsphere_exporter.py`](vsphere-exporter/vsphere_exporter.py) fills that gap — it connects directly to the ESXi host's vSphere API via `pyvmomi` (the same API vCenter is built on) and exposes the results in Prometheus format, giving three layers of observability: **vSphere → Kubernetes → System**.
 
