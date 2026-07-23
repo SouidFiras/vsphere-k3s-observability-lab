@@ -21,3 +21,8 @@ scrape_configs:
     static_configs:
       - targets:
           - 'put your vSphere exporter host here (ip and port)'
+  - job_name: 'windows-exporter'
+    static_configs:
+      - targets:
+          - 'put your windows exporter host here (ip and port)'
+          

@@ -1,16 +1,16 @@
 # vSphere + k3s Observability Lab
 
-A self-hosted virtualization, orchestration, and observability lab — built to explore how a VMware vSphere environment, a lightweight Kubernetes cluster, and a full monitoring stack fit together, end to end.
+A self-hosted virtualization, orchestration, and observability lab built to explore how a VMware vSphere environment, a lightweight Kubernetes cluster, and a full monitoring stack fit together, end to end.
 
 ![Grafana Dashboard](docs/screenshots/grafana-node-exporter.png)
 
 ## Context
 
-This project started during an internship at **Société Monétique Tunisie (SMT)**, Tunisia's national interbank switching company. The internship came without an assigned project or access to production systems — a reasonable constraint, given SMT's environment runs live banking infrastructure (a VMware vSphere/ESXi stack of roughly 600 VMs, monitored via SolarWinds).
+This project started during an internship at **Société Monétique Tunisie (SMT)**, Tunisia's national interbank switching company. The internship came without an assigned project or access to production systems ,a reasonable constraint, given SMT's environment runs live banking infrastructure (a VMware vSphere/ESXi stack of roughly 600 VMs, monitored via SolarWinds).
 
-Rather than wait for direction, I built a self-contained lab mirroring the same architectural pattern  hypervisor, orchestration, monitoring on my own hardware. The goal was to actually understand the full stack hands-on, not just watch it exist.
+Rather than wait for direction, I built a self-contained lab mirroring the same architectural pattern — hypervisor, orchestration, monitoring  on my own hardware. The goal was to actually understand the full stack hands-on, not just watch it exist.
 
-**Note on this README:** I used AI (Claude) to help organize and structure this document  deciding what to cover and how to lay it out and also for some parts of the project like `aws-cost-mapping` and the Ansible playbooks and some of the `FIM` stuff. The content itself , the architecture, the decisions, the debugging, the code  is mine built and tested on infrastructure I set up and run myself on my personal device.
+**Note on this README:** I used AI (Claude) to help organize and structure this document — deciding what to cover and how to lay it out  and also for some parts of the project like `aws-cost-mapping` and the Ansible playbooks. The content itself — the architecture, the decisions, the debugging, the code  is mine, built and tested on infrastructure I set up and run myself on my personal device.
 
 ## Architecture
 
@@ -18,13 +18,14 @@ Rather than wait for direction, I built a self-contained lab mirroring the same 
 
 **Stack summary:**
 - **Host:** Windows 11 → VMware Workstation Pro → nested ESXi 7.0.3 (evaluation license, standalone — no vCenter)
-- **4 VMs on ESXi:**
+- **5 VMs on ESXi:**
   - `ubuntu` — k3s control-plane
   - `k3s-node-1`, `k3s-node-2` — k3s workers
   - `monitoring` — Prometheus, Grafana, Alertmanager (via Docker Compose), Ansible control node, custom vSphere exporter
+  - `windows-server` — Windows Server 2016 (Server Core), running `windows_exporter` for cross-platform validation
 - **Orchestration:** k3s (lightweight Kubernetes), chosen for its small footprint given hardware constraints
 - **Observability:** three independent layers feeding one Prometheus instance:
-  - `node-exporter` — system-level metrics (CPU/RAM/disk/network) per VM, running on all 4 VMs including the monitoring VM itself
+  - `node-exporter` / `windows-exporter` — system-level metrics (CPU/RAM/disk/network) across all Linux and Windows VMs
   - `kube-state-metrics` — Kubernetes object-level metrics (pod status, deployments, node conditions)
   - custom `vsphere-exporter` (this repo) — vSphere-layer metrics (per-VM CPU/memory, datastore capacity, host stats) via `pyvmomi`
 - **Alerting:** Alertmanager, wired to Prometheus, sends email notifications on threshold breaches and file integrity events (see below)
@@ -81,13 +82,14 @@ Rather than wait for direction, I built a self-contained lab mirroring the same 
 
 ## Observability stack
 
-Prometheus scrapes three independent target types, now including the monitoring VM itself:
+Prometheus scrapes four independent target types, spanning both Linux and Windows:
 
 | Job | Source | Port | What it exposes |
 |---|---|---|---|
-| `node-exporter` | all 4 VMs (3 k3s nodes + monitoring) | `9100` | CPU, memory, disk, network per VM |
+| `node-exporter` | all 4 Linux VMs (3 k3s nodes + monitoring) | `9100` | CPU, memory, disk, network per VM |
 | `kube-state-metrics` | k3s cluster (NodePort) | `30080` | Pod status, deployments, node conditions |
 | `vsphere-exporter` | monitoring VM (this repo) | `9272` | VM CPU/memory, datastore capacity, host stats |
+| `windows-exporter` | Windows Server 2016 VM | `9182` | CPU, memory, disk, network (Windows equivalent of node-exporter) |
 
 Grafana visualizes all three: the community "Node Exporter Full" dashboard (ID 1860) for system metrics, a Kubernetes cluster dashboard for kube-state-metrics, and a custom-built dashboard for the vSphere layer (queries in [`vsphere-exporter/`](vsphere-exporter/)).
 
@@ -115,6 +117,17 @@ Getting this right required real tuning, not just installation:
 This one uses a **manual acknowledgment model** rather than auto-resolving: once a change is detected, the alert stays in a firing state until a human explicitly reviews it and runs `ack_folder_alert.sh` to clear it. This is a deliberate choice — unlike a CPU spike, a file change to a monitored folder isn't something that should be considered "resolved" just because time passed; it should be resolved because someone looked at it.
 
 Both approaches were tested end-to-end: creating a file in the watched folder triggers an immediate email alert with the correct instance and description, and running the acknowledgment script produces the resolved notification.
+
+## Cross-platform validation
+
+To confirm the observability stack isn't Linux-only, a **Windows Server 2016 VM (Server Core, no GUI)** was added to the ESXi host, running [`windows_exporter`](https://github.com/prometheus-community/windows_exporter) (the Windows equivalent of node_exporter) on port `9182`. It's scraped by the same Prometheus instance and visualized via Grafana dashboard ID **16523**, alongside the existing Linux/Kubernetes/vSphere panels — several other community dashboard IDs (14451, 10467, and others) were tried first and didn't render correctly due to metric-naming mismatches across `windows_exporter` versions, before landing on one that matched this exporter version's schema.
+
+**Windows-specific limitations worth noting, since the rest of this lab is Linux-first:**
+- **No Ansible automation for this VM.** Ansible's default connection method is SSH, and while Ansible does support WinRM for Windows targets, this wasn't set up here — the Windows VM was configured manually (PowerShell, run interactively via the ESXi console). This is a real gap relative to the rest of the lab, where every Linux node is configured idempotently via Ansible playbooks.
+- **No SSH by default on Server 2016.** Unlike Server 2019+, Server 2016 doesn't ship the OpenSSH Windows Capability — `Add-WindowsCapability`/DISM simply doesn't offer it on this version. SSH access would require manually installing the Win32-OpenSSH binaries separately; this lab left the VM SSH-less and managed it directly.
+- **Downloads over `Invoke-WebRequest` were unreliable** on this OS/PowerShell version (connection resets fetching from GitHub) — `Start-BitsTransfer` was used instead, which handled the same downloads without issue.
+
+These gaps are left as-is rather than solved, since the goal of this VM was narrowly to validate cross-platform monitoring — not to build out full Windows configuration management, which would be a reasonable next step (via Ansible + WinRM, or a Windows-native tool like DSC) if this were extended further.
 
 ## Automation with Ansible
 
@@ -159,8 +172,8 @@ Estimated total monthly cost (EC2 equivalent, On-Demand): $167.01
 
 - **vCenter Server** is not deployed (hardware constraints) — Terraform's clone workflow and vSphere CPI/CSI integration for Kubernetes both require it, and remain designed-for-but-not-implemented here.
 - **AWS cost-mapping** currently uses a static pricing snapshot; a production version would query the AWS Price List API directly for live, region-specific rates.
-- **A Windows VM for cross-platform monitoring validation** is planned but not yet added — would use `windows_exporter` (the Windows equivalent of node_exporter) to confirm the observability stack isn't Linux-only.
-- A 3rd k3s worker node was deliberately not added — with no real workloads to schedule, it would add resource cost without adding architectural value.
+- **Windows configuration management** — the Windows VM is managed manually rather than via Ansible (see Cross-platform validation above); extending Ansible to cover it via WinRM is a reasonable next step.
+- A 3rd k3s worker node was deliberately not added  with no real workloads to schedule, it would add resource cost without adding architectural value.
 
 ## Author
 
