@@ -1,0 +1,49 @@
+---
+- name: Install and configure AIDE for File Integrity Monitoring
+  hosts: k3s_nodes
+  become: true
+
+  tasks:
+    - name: Install AIDE
+      apt:
+        name: aide
+        state: present
+        update_cache: true
+
+    - name: Check if AIDE database already initialized
+      stat:
+        path: /var/lib/aide/aide.db
+      register: aide_db
+
+    - name: Initialize AIDE database (baseline)
+      command: aideinit
+      when: not aide_db.stat.exists
+
+    - name: Move new database into place
+      command: mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db
+      args:
+        creates: /var/lib/aide/aide.db
+      when: not aide_db.stat.exists
+
+    - name: Create AIDE check script that exports Prometheus textfile metric
+      copy:
+        dest: /usr/local/bin/aide_check.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          OUTPUT_FILE=/var/lib/node_exporter/textfile_collector/aide.prom
+          TMP_FILE=$(mktemp)
+
+          if aide --check > /tmp/aide_report.txt 2>&1; then
+            echo "aide_changes_detected 0" > "$TMP_FILE"
+          else
+            echo "aide_changes_detected 1" > "$TMP_FILE"
+          fi
+          echo "aide_last_check_timestamp $(date +%s)" >> "$TMP_FILE"
+          mv "$TMP_FILE" "$OUTPUT_FILE"
+
+    - name: Schedule AIDE check via cron (every 15 minutes)
+      cron:
+        name: "AIDE integrity check"
+        minute: "*/15"
+        job: "/usr/local/bin/aide_check.sh"

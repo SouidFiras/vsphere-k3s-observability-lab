@@ -1,8 +1,17 @@
 services:
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+    ports:
+      - "9093:9093"
+    restart: unless-stopped
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
     volumes:
+      - ./prometheus/alert.rules.yml:/etc/prometheus/alert.rules.yml
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus_data:/prometheus
     ports:

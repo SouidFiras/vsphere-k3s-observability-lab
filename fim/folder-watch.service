@@ -1,0 +1,11 @@
+[Unit]
+Description=Real-time folder integrity watcher (inotify)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/watch_folder.sh
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target

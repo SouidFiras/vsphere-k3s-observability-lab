@@ -8,9 +8,9 @@ A self-hosted virtualization, orchestration, and observability lab — built to 
 
 This project started during an internship at **Société Monétique Tunisie (SMT)**, Tunisia's national interbank switching company. The internship came without an assigned project or access to production systems — a reasonable constraint, given SMT's environment runs live banking infrastructure (a VMware vSphere/ESXi stack of roughly 600 VMs, monitored via SolarWinds).
 
-Rather than wait for direction, I built a self-contained lab mirroring the same architectural pattern — hypervisor, orchestration, monitoring — on my own hardware. The goal was to actually understand the full stack hands-on, not just watch it exist.
+Rather than wait for direction, I built a self-contained lab mirroring the same architectural pattern  hypervisor, orchestration, monitoring on my own hardware. The goal was to actually understand the full stack hands-on, not just watch it exist.
 
-**Note on this README:** I used AI (Claude) to help organize and structure this document  deciding what to cover and how to lay it out , and also some parts of the project like aws-cost-mapping and the ansible playbook . The content itself  the architecture, the decisions, the debugging, the code is mine, built and tested on infrastructure I set up and run myself on my personal device.
+**Note on this README:** I used AI (Claude) to help organize and structure this document  deciding what to cover and how to lay it out and also for some parts of the project like `aws-cost-mapping` and the Ansible playbooks and some of the `FIM` stuff. The content itself , the architecture, the decisions, the debugging, the code  is mine built and tested on infrastructure I set up and run myself on my personal device.
 
 ## Architecture
 
@@ -21,13 +21,15 @@ Rather than wait for direction, I built a self-contained lab mirroring the same 
 - **4 VMs on ESXi:**
   - `ubuntu` — k3s control-plane
   - `k3s-node-1`, `k3s-node-2` — k3s workers
-  - `monitoring` — Prometheus, Grafana (via Docker Compose), Ansible control node, custom vSphere exporter
+  - `monitoring` — Prometheus, Grafana, Alertmanager (via Docker Compose), Ansible control node, custom vSphere exporter
 - **Orchestration:** k3s (lightweight Kubernetes), chosen for its small footprint given hardware constraints
 - **Observability:** three independent layers feeding one Prometheus instance:
-  - `node-exporter` — system-level metrics (CPU/RAM/disk/network) per VM
+  - `node-exporter` — system-level metrics (CPU/RAM/disk/network) per VM, running on all 4 VMs including the monitoring VM itself
   - `kube-state-metrics` — Kubernetes object-level metrics (pod status, deployments, node conditions)
   - custom `vsphere-exporter` (this repo) — vSphere-layer metrics (per-VM CPU/memory, datastore capacity, host stats) via `pyvmomi`
-- **Automation:** Ansible (configuration management across all 3 k3s nodes), Terraform (intended provisioning layer — see limitation below)
+- **Alerting:** Alertmanager, wired to Prometheus, sends email notifications on threshold breaches and file integrity events (see below)
+- **Security monitoring:** two complementary File Integrity Monitoring (FIM) approaches — periodic hash-based scanning (AIDE) and real-time event-based watching (`inotify`) — see below
+- **Automation:** Ansible (configuration management across all k3s nodes), Terraform (intended provisioning layer — see limitation below)
 
 ## Key engineering decisions
 
@@ -39,27 +41,39 @@ Rather than wait for direction, I built a self-contained lab mirroring the same 
 
 **Why a custom exporter instead of relying only on community tooling.** `node-exporter` and `kube-state-metrics` cover the system and Kubernetes layers, but neither exposes vSphere-level state (VM power state, datastore capacity, host resource usage as seen by the hypervisor). [`vsphere-exporter/vsphere_exporter.py`](vsphere-exporter/vsphere_exporter.py) fills that gap — it connects directly to the ESXi host's vSphere API via `pyvmomi` (the same API vCenter is built on) and exposes the results in Prometheus format, giving three layers of observability: **vSphere → Kubernetes → System**.
 
+**Why two different FIM approaches instead of one.** AIDE (periodic, hash-based, full-system scan) and `inotify` (real-time, event-driven, scoped) solve the same underlying problem — detecting unauthorized file changes — with different tradeoffs. AIDE is thorough but slower and needs careful tuning to avoid false positives; `inotify` is instant but only practical for a bounded set of paths. Having both demonstrates the two dominant models used in real FIM tooling, rather than treating "install AIDE" as the entire problem.
+
 ## Repository structure
 
 ```
-├── terraform/              
-├── ansible/                 
+├── terraform/               # Intended IaC design (vCenter-targeted; see limitation above)
+├── ansible/                  # Configuration management playbooks
 │   ├── inventory.ini.example
 │   ├── ansible.cfg
 │   ├── node_exporter.yml
 │   ├── ufw_setup.yml
+│   ├── fim_setup.yml         # Installs AIDE, initializes baseline, schedules periodic checks
+│   ├── node_exporter_textfile.yml  # Enables node_exporter's textfile collector
 │   └── ...
-├── vsphere-exporter/       
+├── vsphere-exporter/         # Custom Prometheus exporter for the vSphere layer
 │   ├── vsphere_exporter.py
 │   └── vsphere-exporter.service
-├── aws-cost-mapping/       
+├── aws-cost-mapping/         # VM specs -> EC2 instance/cost estimate
 │   └── cost_mapping.py
+├── fim/                       # File Integrity Monitoring scripts
+│   ├── aide_check.sh          # AIDE periodic check -> Prometheus textfile metric
+│   ├── watch_folder.sh        # inotify real-time folder watcher -> Prometheus textfile metric
+│   ├── ack_folder_alert.sh    # Manual acknowledgment/clear script for the inotify watcher
+│   └── folder-watch.service
 ├── scripts/
-│   └── clone_node.sh        
+│   └── clone_node.sh          # ESXi CLI-based VM cloning (standalone-ESXi workaround)
 ├── monitoring/
-│   ├── docker-compose.yml
+│   ├── docker-compose.yml     # Prometheus, Grafana, Alertmanager
+│   ├── alertmanager/
+│   │   └── alertmanager.yml
 │   └── prometheus/
-│       └── prometheus.yml
+│       ├── prometheus.yml
+│       └── alert.rules.yml
 └── docs/
     ├── architecture.png
     └── screenshots/
@@ -67,27 +81,53 @@ Rather than wait for direction, I built a self-contained lab mirroring the same 
 
 ## Observability stack
 
-Prometheus scrapes three independent target types:
+Prometheus scrapes three independent target types, now including the monitoring VM itself:
 
 | Job | Source | Port | What it exposes |
 |---|---|---|---|
-| `node-exporter` | all 3 k3s nodes | `9100` | CPU, memory, disk, network per VM |
+| `node-exporter` | all 4 VMs (3 k3s nodes + monitoring) | `9100` | CPU, memory, disk, network per VM |
 | `kube-state-metrics` | k3s cluster (NodePort) | `30080` | Pod status, deployments, node conditions |
 | `vsphere-exporter` | monitoring VM (this repo) | `9272` | VM CPU/memory, datastore capacity, host stats |
 
 Grafana visualizes all three: the community "Node Exporter Full" dashboard (ID 1860) for system metrics, a Kubernetes cluster dashboard for kube-state-metrics, and a custom-built dashboard for the vSphere layer (queries in [`vsphere-exporter/`](vsphere-exporter/)).
 
+## Alerting
+
+Alertmanager runs alongside Prometheus and Grafana (via Docker Compose) and sends email notifications when defined thresholds are crossed, and again when they clear.
+
+**CPU threshold alert** (`monitoring/prometheus/alert.rules.yml`): fires when a node's CPU usage stays above a defined threshold for a sustained period (`for: 2m`, to avoid noise from brief spikes), and automatically sends a resolved email once usage drops back down (`send_resolved: true`) — no manual step needed for this one, since a CPU spike is a transient condition that resolves on its own.
+
+Tested end-to-end using `stress` to artificially load a node's CPU and confirm both the firing and resolved notifications arrive correctly, with the alert correctly scoped to the specific node under load (via Prometheus's per-`instance` label grouping) rather than the whole fleet.
+
+## File Integrity Monitoring (FIM)
+
+Two complementary approaches, both feeding the same Prometheus/Alertmanager pipeline used for the CPU alert:
+
+**1. AIDE (periodic, hash-based, system-wide)** — deployed via Ansible (`ansible/fim_setup.yml`) across all 3 k3s nodes. AIDE takes a cryptographic-hash baseline of the filesystem and re-checks it on a schedule (every 15 minutes via cron), reporting whether anything changed.
+
+Getting this right required real tuning, not just installation:
+- AIDE's default config includes an unrestricted `/ 0 Full` rule — hashing the entire filesystem, including k3s's container storage (`/var/lib/rancher`, `/var/lib/containerd`), which is both large and constantly changing. This made initial scans take 25+ minutes and produce constant false positives.
+- A dedicated exclusion file (`98_aide_k3s_exclude`) was added to scope AIDE to security-relevant paths only, excluding container runtime storage, pseudo-filesystems (`/proc`, `/sys`), AIDE's own working files, Ansible's own ephemeral execution artifacts, systemd/journald churn, and dynamic device-mapper nodes — all of which change constantly by design and carry no security signal.
+- Results are exposed to Prometheus via node_exporter's **textfile collector** — a plain-text metric file (`aide_changes_detected 0/1`) that `aide_check.sh` writes after each run.
+
+**2. `inotify` (real-time, event-driven, scoped)** — for cases needing instant detection on a specific file or folder rather than a periodic scan. `fim/watch_folder.sh` uses `inotifywait -m -r` to watch a folder recursively and its contents in real time, logging every detected change (create/modify/delete/move) to syslog and writing a Prometheus metric the moment something happens — no waiting for the next cron cycle.
+
+This one uses a **manual acknowledgment model** rather than auto-resolving: once a change is detected, the alert stays in a firing state until a human explicitly reviews it and runs `ack_folder_alert.sh` to clear it. This is a deliberate choice — unlike a CPU spike, a file change to a monitored folder isn't something that should be considered "resolved" just because time passed; it should be resolved because someone looked at it.
+
+Both approaches were tested end-to-end: creating a file in the watched folder triggers an immediate email alert with the correct instance and description, and running the acknowledgment script produces the resolved notification.
+
 ## Automation with Ansible
 
-Rather than configuring all 3 k3s nodes by hand, [`ansible/`](ansible/) contains playbooks for:
-- `node_exporter.yml` — installs and configures node-exporter as a systemd service across all nodes, idempotently
+Rather than configuring nodes by hand, [`ansible/`](ansible/) contains playbooks for:
+- `node_exporter.yml` / `node_exporter_textfile.yml` — installs and configures node-exporter (with the textfile collector enabled) as a systemd service across all nodes, idempotently
 - `ufw_setup.yml` — configures UFW firewall rules (SSH, k3s API, kubelet, Flannel overlay, node-exporter, NodePort range) with a safe default-deny incoming policy
+- `fim_setup.yml` — installs AIDE, initializes the baseline database, and schedules periodic integrity checks via cron
 
 Passwordless SSH (key-based auth) and passwordless sudo (`NOPASSWD`) on the target nodes allow these playbooks to run unattended, the same pattern used by real automation/CI systems.
 
 ## Setup (approximate reproduction steps)
 
-This lab isn't a one-command deploy — reproducing it means: nested ESXi on VMware Workstation, a base Ubuntu Server VM converted into a clone source, 2 additional nodes cloned via `scripts/clone_node.sh`, k3s installed on all 3 (`curl -sfL https://get.k3s.io | sh -` on the control-plane, agent join on the workers), a separate monitoring VM running Docker Compose with the stack in `monitoring/`, and the exporter in `vsphere-exporter/` deployed as a systemd service with `ESXI_HOST`/`ESXI_USER`/`ESXI_PASSWORD` environment variables set.
+This lab isn't a one-command deploy — reproducing it means: nested ESXi on VMware Workstation, a base Ubuntu Server VM converted into a clone source, 2 additional nodes cloned via `scripts/clone_node.sh`, k3s installed on all 3 (`curl -sfL https://get.k3s.io | sh -` on the control-plane, agent join on the workers), a separate monitoring VM running Docker Compose with the stack in `monitoring/` (Prometheus, Grafana, Alertmanager), the exporter in `vsphere-exporter/` deployed as a systemd service with `ESXI_HOST`/`ESXI_USER`/`ESXI_PASSWORD` environment variables set, and the FIM scripts in `fim/` deployed via the Ansible playbooks above.
 
 ## AWS cost mapping
 
@@ -119,8 +159,9 @@ Estimated total monthly cost (EC2 equivalent, On-Demand): $167.01
 
 - **vCenter Server** is not deployed (hardware constraints) — Terraform's clone workflow and vSphere CPI/CSI integration for Kubernetes both require it, and remain designed-for-but-not-implemented here.
 - **AWS cost-mapping** currently uses a static pricing snapshot; a production version would query the AWS Price List API directly for live, region-specific rates.
+- **A Windows VM for cross-platform monitoring validation** is planned but not yet added — would use `windows_exporter` (the Windows equivalent of node_exporter) to confirm the observability stack isn't Linux-only.
 - A 3rd k3s worker node was deliberately not added — with no real workloads to schedule, it would add resource cost without adding architectural value.
 
 ## Author
 
-Built by Firas Souid during an internship at SMT, as a self-directed exploration of virtualization, orchestration, and observability .
+Built by Firas Souid during an internship at SMT, as a self-directed exploration of virtualization, orchestration, and observability.

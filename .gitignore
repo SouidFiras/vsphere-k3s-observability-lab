@@ -6,3 +6,4 @@
 .terraform.lock.hcl
 *.env
 env
+monitoring/alertmanager/alertmanager.yml

@@ -1,0 +1,25 @@
+---
+- name: Enable node_exporter textfile collector
+  hosts: k3s_nodes
+  become: true
+
+  tasks:
+    - name: Create textfile collector directory
+      file:
+        path: /var/lib/node_exporter/textfile_collector
+        state: directory
+        owner: node_exporter
+        group: node_exporter
+        mode: '0755'
+
+    - name: Update systemd service to enable textfile collector
+      lineinfile:
+        path: /etc/systemd/system/node_exporter.service
+        regexp: '^ExecStart='
+        line: 'ExecStart=/usr/local/bin/node_exporter --collector.textfile.directory=/var/lib/node_exporter/textfile_collector'
+
+    - name: Reload systemd and restart node_exporter
+      systemd:
+        daemon_reload: true
+        name: node_exporter
+        state: restarted

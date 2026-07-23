@@ -1,0 +1,21 @@
+groups:
+  - name: cpu_alerts
+    rules:
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is above 10% for more than 2 minute (current value: {{ $value | printf \"%.2f\" }}%)"
+  - name: FIM_alerts
+    rules:
+      - alert: FolderIntegrityChangeDetected
+        expr: folder_change_detected == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Unacknowledged file change detected in watched folder on {{ $labels.instance }}"
+          description: "inotify detected a change in the watched folder. Check syslog on that host for details, then run ack_folder_alert.sh once reviewed."
